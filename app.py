@@ -11,7 +11,7 @@ from rapidfuzz import process, fuzz
 # 기본 설정
 # ===============================
 st.set_page_config(page_title="PATH", page_icon="📖", layout="centered")
-st.title("📖 PATH — 신학 유학생용 한국어 작문 튜터")
+st.title("PATH — 신학 유학생용 한국어 작문 튜터")
 st.caption("Pedagogical AI writing tutor for Theology and Humanities (TOPIK 3–4)")
 
 # ===============================
