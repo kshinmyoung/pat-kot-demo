@@ -1,5 +1,5 @@
 # ===============================
-# PATH AI Writing Tutor (Stable)
+# PATH AI Writing Tutor (Mode-Enhanced Stable)
 # ===============================
 import os
 import re
@@ -14,7 +14,7 @@ from rapidfuzz import process, fuzz
 # 기본 UI 설정
 # -------------------------------
 st.set_page_config(page_title="PATH AI Writing Tutor", page_icon="🧭", layout="centered")
-st.title("PATH AI writing tutor— 신학 유학생용 한국어 작문 튜터")
+st.title("🧭 PATH AI writing tutor— 신학 유학생용 한국어 작문 튜터")
 st.caption("Pedagogical AI writing tutor for Theology and Humanities (TOPIK 3–4)")
 
 # -------------------------------
@@ -176,6 +176,105 @@ def format_bible_examples(rows: list[dict]) -> str:
     return "\n".join(out)
 
 # -------------------------------
+# 모드별 시스템/유저 프롬프트 빌더 (강화)
+# -------------------------------
+def build_system_msg(language: str) -> str:
+    if language == "한국어 (KR)":
+        return (
+            "You are a Korean academic writing tutor for theology students. "
+            "Respond ONLY in Korean. Use polite '-습니다' style. "
+            "Never include English unless the user text itself is English."
+        )
+    elif language == "영어 (EN)":
+        return (
+            "You are an academic writing tutor for theology students. "
+            "Respond ONLY in English. Do not include any Korean."
+        )
+    else:  # 이중언어 (KR+EN)
+        return (
+            "You are a bilingual (KR+EN) academic writing tutor for theology students. "
+            "First, produce a full Korean feedback section. Then add a separator line "
+            "and provide a concise English summary (2–3 lines)."
+        )
+
+def build_user_prompt(base_prompt: str, language: str, student_text: str,
+                      examples_block: str, strategy: str) -> str:
+    if language == "한국어 (KR)":
+        return f"""
+{base_prompt}
+
+[학생의 글]
+{student_text}
+
+[관련 성경 예시]
+{examples_block}
+
+[교수전략]
+{strategy}
+
+[출력 형식 엄수]
+- 반드시 **한국어**로만 작성
+- 10~12줄, '-습니다'체
+- 구조: 칭찬 → 오류2(설명+고친예) → 성경예시 요약2 → 재작성 지시 → 강점/다음목표
+"""
+    elif language == "영어 (EN)":
+        return f"""
+{base_prompt}
+
+[STUDENT TEXT]
+{student_text}
+
+[RELATED BIBLE EXAMPLES]
+{examples_block}
+
+[INSTRUCTIONAL STRATEGY]
+{strategy}
+
+[OUTPUT FORMAT - STRICT]
+- Respond **ONLY in English**
+- 8–10 lines, academic tone
+- Structure: Praise → 2 errors (explain+example) → 2 Bible examples (brief) → Rewrite instruction → Strength/Next goal
+"""
+    else:  # 이중언어
+        return f"""
+{base_prompt}
+
+[학생의 글 / Student Text]
+{student_text}
+
+[관련 성경 예시 / Bible Examples]
+{examples_block}
+
+[교수전략 / Strategy]
+{strategy}
+
+[OUTPUT FORMAT - STRICT]
+(1) [KR] 한국어 섹션 (10~12줄, '-습니다'체)
+    - 칭찬 → 오류2(설명+고친예) → 성경예시 요약2 → 재작성 지시 → 강점/다음목표
+(2) ----------  ← 이 구분선 반드시 포함
+(3) [EN] English brief (2–3 lines)
+    - Summarize key fixes and rewrite goal
+"""
+
+# -------------------------------
+# 출력 검증기(모드 위반 자동 안내)
+# -------------------------------
+def validate_output_by_mode(output: str, language: str) -> str:
+    kr = len(re.findall(r"[가-힣]", output))
+    en = len(re.findall(r"[A-Za-z]", output))
+
+    if language == "한국어 (KR)":
+        if en > kr * 0.2:
+            output = "⚠️ (자동 점검) 영어 비율이 높습니다. 한국어로만 간결하게 작성해 주세요.\n\n" + output
+    elif language == "영어 (EN)":
+        if kr > en * 0.2:
+            output = "⚠️ (Auto check) Too much Korean detected. Respond in English only.\n\n" + output
+    else:  # 이중언어
+        if "----------" not in output or "[EN]" not in output:
+            output += "\n\n----------\n[EN] Please add a 2–3 line English summary of key feedback and rewrite goal."
+    return output
+
+# -------------------------------
 # 사이드바 (참가자 & 교수자)
 # -------------------------------
 st.sidebar.header("참여자")
@@ -257,9 +356,13 @@ if is_admin:
 # 본문 UI
 # -------------------------------
 language = st.radio(
-    "피드백 언어 모드", ["한국어 (KR)", "영어 (EN)", "이중언어 (KR+EN)"],
+    "피드백 언어 모드",
+    ["한국어 (KR) — 한국어만", "영어 (EN) — English only", "이중언어 (KR+EN) — KR + EN summary"],
     index=0, horizontal=True
 )
+# 선택값 표준화
+language = language.split(" — ")[0]
+
 topic = st.selectbox("주제(태그)", ["(자동)", "사랑", "믿음", "기도", "감사", "말씀", "권면", "설명", "요약", "적용"])
 student_text = st.text_area("✍️ 학생 글(3–8문장 권장)", height=160, placeholder="예) 저는 오늘 말씀을 통해 ...")
 strategy = st.selectbox(
@@ -273,7 +376,7 @@ if col_btn2.button("지우기"):
     st.experimental_rerun()
 
 # -------------------------------
-# 데모 피드백(오프라인 폴백 규칙)
+# 데모 피드백(오프라인 폴백 규칙 — 모드 차별화)
 # -------------------------------
 def demo_feedback(text: str, examples_block: str, lang: str) -> str:
     tips = []
@@ -287,26 +390,40 @@ def demo_feedback(text: str, examples_block: str, lang: str) -> str:
         tips.append(("[문장 분리]", "긴 문장은 두 문장으로.", "예) 수업이 끝났습니다. 곧 정리했습니다."))
 
     if lang == "영어 (EN)":
-        lines = [
+        return "\n".join([
             "Great effort—your faith and intention are clear.",
             "- [Particles] Use '의/을/를' properly. e.g., 하나님의 사랑을 배웠습니다.",
             "- [Polite ending] Use '-습니다' for academic tone.",
             examples_block.strip() or "📖 (No related Bible example)",
             "Please rewrite in 3–5 sentences using the feedback.",
             "Strength: Clear topic | Next goal: particles & polite endings.",
+        ])
+    elif lang == "이중언어 (KR+EN)":
+        kr = [
+            "좋은 시도예요. 신앙의 마음이 잘 느껴집니다.",
+            "- [조사] '의/을/를'을 정확히 씁니다. 예) 하나님의 사랑을 배웠습니다.",
+            "- [격식] '-입니다/-습니다'체 사용.",
+            examples_block.strip() or "📖 (관련 성경 예시 없음)",
+            "이제 위 내용을 참고해 3–5문장으로 다시 써보세요.",
+            "강점: 주제가 분명함 | 다음 목표: 조사·격식 다듬기",
+        ]
+        en = [
+            "----------",
+            "[EN] Focus on particles and polite endings.",
+            "Rewrite in 3–5 sentences using the feedback."
+        ]
+        return "\n".join(kr + en)
+    else:
+        # 한국어 기본
+        lines = [
+            "좋은 시도예요. 신앙의 마음이 잘 느껴집니다.",
+            "- [조사] '의/을/를'을 정확히 씁니다.",
+            "- [격식] '-습니다'체로 정리합니다.",
+            examples_block.strip() or "📖 (관련 성경 예시 없음)",
+            "3–5문장으로 다시 써보세요.",
+            "강점: 주제가 분명함 | 다음 목표: 조사·격식 다듬기",
         ]
         return "\n".join(lines)
-
-    lines = ["좋은 시도예요. 신앙의 마음이 잘 느껴집니다."]
-    for name, rule, ex in tips[:2]:
-        lines.append(f"- {name} {rule}")
-        lines.append(f"  고친 예: {ex}")
-    lines.append(examples_block.strip() or "📖 (관련 성경 예시 없음)")
-    lines.append("이제 위 내용을 참고해 3–5문장으로 다시 써보세요. 한 문장에 성경 예시를 활용해도 좋아요.")
-    lines.append("강점: 주제가 분명함 | 다음 목표: 조사·격식 다듬기")
-    if lang == "이중언어 (KR+EN)":
-        lines += ["", "— English brief —", "Focus on particles & polite endings. Rewrite in 3–5 sentences."]
-    return "\n".join(lines)
 
 # -------------------------------
 # 실행 로직
@@ -336,20 +453,9 @@ if run_clicked:
         else:
             base = prompt_kr + "\n\n추가: 위 한국어 피드백 끝에 영어로 2–3줄 핵심 요약을 덧붙이세요."
 
-        full_prompt = f"""
-{base}
-
-[학생의 글]
-{student_text}
-
-[관련 성경 예시]
-{examples_block}
-
-[교수전략]
-{strategy}
-
-(조건) 전체 답변은 10–12줄, 짧은 존댓말로.
-"""
+        # 모드 강화 프롬프트 구성
+        system_msg = build_system_msg(language)
+        user_msg = build_user_prompt(base, language, student_text, examples_block, strategy)
 
         # 실제 API 호출 또는 데모 폴백
         if client:
@@ -357,11 +463,12 @@ if run_clicked:
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "You are a Korean academic writing tutor for theology students."},
-                        {"role": "user", "content": full_prompt[:4000]},
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg[:6000]},
                     ],
-                    temperature=0.2,
-                    max_tokens=700,
+                    temperature=0.3,
+                    top_p=0.9,
+                    max_tokens=900,
                 )
                 feedback = resp.choices[0].message.content.strip()
             except Exception as e:
@@ -369,6 +476,9 @@ if run_clicked:
                 feedback = demo_feedback(student_text, examples_block, language)
         else:
             feedback = demo_feedback(student_text, examples_block, language)
+
+        # 모드 출력 검증
+        feedback = validate_output_by_mode(feedback, language)
 
         st.subheader("💬 AI 피드백")
         st.write(feedback)
