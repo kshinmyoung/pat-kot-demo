@@ -10,9 +10,9 @@ from rapidfuzz import process, fuzz
 # ===============================
 # 기본 설정
 # ===============================
-st.set_page_config(page_title="PaT-KoT AI Tutor", page_icon="📖", layout="centered")
-st.title("📖 PaT-KoT — 신학 유학생용 한국어 작문 튜터")
-st.caption("Pedagogically & Theologically Adaptive Korean Tutor (TOPIK 3–4)")
+st.set_page_config(page_title="PATH", page_icon="📖", layout="centered")
+st.title("📖 PATH — 신학 유학생용 한국어 작문 튜터")
+st.caption("Pedagogical AI for Theology and Humanities (TOPIK 3–4)")
 
 # ===============================
 # Secrets / .env 로드
