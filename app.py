@@ -61,25 +61,25 @@ st.caption(f"🔎 ADMIN_CODE 감지: {'✅' if ADMIN_CODE_SECRET else '❌'}")
 # ===============================
 # 진단 패널(문제 시 펼쳐 확인)
 # ===============================
-with st.expander("🔧 진단 패널 (문제 시 펼쳐 확인)"):
-    files = ["app.py", "requirements.txt", "corpus.csv", "feedback_prompt.txt", "feedback_prompt_en.txt"]
-    exists = {f: ("✅" if os.path.exists(f) else "❌") for f in files}
-    st.table({"파일": list(exists.keys()), "존재": list(exists.values())})
+# 🔧 진단 패널 (교수자 모드에서만 보이기)
+if is_admin:
+    with st.expander("🔧 진단 패널 (문제 시 펼쳐 확인)"):
+        files = ["app.py", "requirements.txt", "corpus.csv", "feedback_prompt.txt", "feedback_prompt_en.txt"]
+        exists = {f: ("✅" if os.path.exists(f) else "❌") for f in files}
+        st.table({"파일": list(exists.keys()), "존재": list(exists.values())})
 
-    # corpus.csv 간단 검증
-    try:
-        df_probe = pd.read_csv("corpus.csv").head(2)
-        st.write("corpus.csv 미리보기:", df_probe)
-    except Exception as e:
-        st.error(f"corpus.csv 읽기 오류: {e}")
-
-    # 프롬프트 파일 미리보기
-    for p in ["feedback_prompt.txt", "feedback_prompt_en.txt"]:
         try:
-            with open(p, "r", encoding="utf-8") as f:
-                st.write(f"{p} OK (미리보기):", f.read(120) + "…")
+            df_probe = pd.read_csv("corpus.csv").head(2)
+            st.write("corpus.csv 미리보기:", df_probe)
         except Exception as e:
-            st.error(f"{p} 읽기 오류: {e}")
+            st.error(f"corpus.csv 읽기 오류: {e}")
+
+        for p in ["feedback_prompt.txt", "feedback_prompt_en.txt"]:
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    st.write(f"{p} OK (미리보기):", f.read(120) + "…")
+            except Exception as e:
+                st.error(f"{p} 읽기 오류: {e}")
 
 # ===============================
 # 유틸: 로그 저장(연구용)
