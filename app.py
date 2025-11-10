@@ -1,5 +1,6 @@
 # ===============================
-# PATH AI Writing Tutor (Mode-Enhanced Stable)
+# PATH AI Writing Tutor (Unified Build)
+# Mode & Strategy Differentiation + Admin-only Diagnostics
 # ===============================
 import os
 import re
@@ -176,6 +177,42 @@ def format_bible_examples(rows: list[dict]) -> str:
     return "\n".join(out)
 
 # -------------------------------
+# 전략 프로필 (명시적 템플릿)
+# -------------------------------
+STRATEGY_PROFILES = {
+    "모형 제시 (Modeling)": {
+        "header": "[모형 제시]",
+        "goal": "정답에 가까운 문단의 완성본을 먼저 보여주고, 그다음 핵심 규칙을 요약해 학생이 모방하도록 한다.",
+        "sections": [
+            "① 모범 문단(3–5문장, -습니다체, 신학 어휘 1개 포함)",
+            "② 규칙 요약(조사 1개 + 연결어 1개 + 격식 1개)",
+            "③ 따라 쓰기 지시(문장 틀 2개 제공)"
+        ],
+        "must_phrases": ["예시 문장:", "규칙:", "따라 써보기:"]
+    },
+    "단계 안내 (Scaffolding)": {
+        "header": "[단계 안내]",
+        "goal": "학생의 초안을 단계별로 변환시키는 절차(분해→수정→결합)를 제공한다.",
+        "sections": [
+            "① 분해(S1~S3로 문장 나누기)",
+            "② 수정(조사·어미·연결어 각각 1개씩 고치기)",
+            "③ 결합(수정한 문장을 3–5문장으로 재조립)"
+        ],
+        "must_phrases": ["분해:", "수정:", "결합:"]
+    },
+    "확장 유도 (Extension)": {
+        "header": "[확장 유도]",
+        "goal": "학생의 현재 문단을 근거·예시·인용으로 확장하여 논증을 강화한다.",
+        "sections": [
+            "① 근거 추가(왜? 한 문장)",
+            "② 사례 추가(예: 성경 인물 1명)",
+            "③ 인용/참조(구절 1개를 자연스럽게 연결)"
+        ],
+        "must_phrases": ["근거:", "사례:", "인용:"]
+    }
+}
+
+# -------------------------------
 # 모드별 시스템/유저 프롬프트 빌더 (강화)
 # -------------------------------
 def build_system_msg(language: str) -> str:
@@ -199,6 +236,26 @@ def build_system_msg(language: str) -> str:
 
 def build_user_prompt(base_prompt: str, language: str, student_text: str,
                       examples_block: str, strategy: str) -> str:
+    # 전략 프로필 주입
+    profile = STRATEGY_PROFILES.get(strategy, None)
+    strat_block = ""
+    if profile:
+        strat_block = f"""
+[전략 헤더]
+{profile['header']}
+
+[전략 목표]
+{profile['goal']}
+
+[필수 섹션]
+- {profile['sections'][0]}
+- {profile['sections'][1]}
+- {profile['sections'][2]}
+
+[필수 표기(출력에 반드시 포함)]
+- {', '.join(profile['must_phrases'])}
+"""
+    # 언어별 프롬프트 본문 + 전략 블록
     if language == "한국어 (KR)":
         return f"""
 {base_prompt}
@@ -212,10 +269,12 @@ def build_user_prompt(base_prompt: str, language: str, student_text: str,
 [교수전략]
 {strategy}
 
+{strat_block}
+
 [출력 형식 엄수]
 - 반드시 **한국어**로만 작성
 - 10~12줄, '-습니다'체
-- 구조: 칭찬 → 오류2(설명+고친예) → 성경예시 요약2 → 재작성 지시 → 강점/다음목표
+- 구조: 칭찬 → 오류2(설명+고친예) → (전략 섹션 수행) → 재작성 지시 → 강점/다음목표
 """
     elif language == "영어 (EN)":
         return f"""
@@ -230,10 +289,12 @@ def build_user_prompt(base_prompt: str, language: str, student_text: str,
 [INSTRUCTIONAL STRATEGY]
 {strategy}
 
+{strat_block}
+
 [OUTPUT FORMAT - STRICT]
 - Respond **ONLY in English**
 - 8–10 lines, academic tone
-- Structure: Praise → 2 errors (explain+example) → 2 Bible examples (brief) → Rewrite instruction → Strength/Next goal
+- Structure: Praise → 2 errors (explain+example) → (strategy section) → Rewrite instruction → Strength/Next goal
 """
     else:  # 이중언어
         return f"""
@@ -248,9 +309,11 @@ def build_user_prompt(base_prompt: str, language: str, student_text: str,
 [교수전략 / Strategy]
 {strategy}
 
+{strat_block}
+
 [OUTPUT FORMAT - STRICT]
 (1) [KR] 한국어 섹션 (10~12줄, '-습니다'체)
-    - 칭찬 → 오류2(설명+고친예) → 성경예시 요약2 → 재작성 지시 → 강점/다음목표
+    - 칭찬 → 오류2(설명+고친예) → (전략 섹션 수행) → 재작성 지시 → 강점/다음목표
 (2) ----------  ← 이 구분선 반드시 포함
 (3) [EN] English brief (2–3 lines)
     - Summarize key fixes and rewrite goal
@@ -272,6 +335,26 @@ def validate_output_by_mode(output: str, language: str) -> str:
     else:  # 이중언어
         if "----------" not in output or "[EN]" not in output:
             output += "\n\n----------\n[EN] Please add a 2–3 line English summary of key feedback and rewrite goal."
+    return output
+
+# -------------------------------
+# 전략 검증기(필수 표기 확인)
+# -------------------------------
+def validate_output_by_strategy(output: str, strategy: str) -> str:
+    profile = STRATEGY_PROFILES.get(strategy)
+    if not profile:
+        return output
+    missing = []
+    if profile["header"] not in output:
+        missing.append(profile["header"])
+    for token in profile["must_phrases"]:
+        if token not in output:
+            missing.append(token)
+    if missing:
+        output = (
+            f"⚠️ (자동 점검) 아래 필수 표기가 누락되었습니다: {', '.join(missing)}\n"
+            f"전략에 맞게 보완해 주세요.\n\n" + output
+        )
     return output
 
 # -------------------------------
@@ -366,8 +449,15 @@ language = language.split(" — ")[0]
 topic = st.selectbox("주제(태그)", ["(자동)", "사랑", "믿음", "기도", "감사", "말씀", "권면", "설명", "요약", "적용"])
 student_text = st.text_area("✍️ 학생 글(3–8문장 권장)", height=160, placeholder="예) 저는 오늘 말씀을 통해 ...")
 strategy = st.selectbox(
-    "교수전략(시연 옵션)", ["자동 선택", "모형 제시 (Modeling)", "단계 안내 (Scaffolding)", "확장 유도 (Extension)"], index=1
+    "교수전략(시연 옵션)",
+    [
+        "모형 제시 (Modeling) — 먼저 모범 문단을 보여주고 모방 유도",
+        "단계 안내 (Scaffolding) — 분해→수정→결합 과정을 단계별 안내",
+        "확장 유도 (Extension) — 근거/사례/인용으로 논증 확장"
+    ],
+    index=0
 )
+strategy = strategy.split(" — ")[0]  # 내부 키로 정규화
 agree = st.checkbox("연구 참여 및 텍스트 익명 저장에 동의합니다.")
 
 col_btn1, col_btn2 = st.columns(2)
@@ -376,54 +466,53 @@ if col_btn2.button("지우기"):
     st.experimental_rerun()
 
 # -------------------------------
-# 데모 피드백(오프라인 폴백 규칙 — 모드 차별화)
+# 데모 피드백(오프라인 폴백 — 모드·전략 차별화)
 # -------------------------------
-def demo_feedback(text: str, examples_block: str, lang: str) -> str:
-    tips = []
-    if re.search(r"(하나님|예수|말씀)[^의]", text):
-        tips.append(("[조사]", "명사 뒤 ‘의/을/를’을 정확히.", "예) 하나님의 사랑을 배웠습니다."))
-    if re.search(r"다[.!]?$", text):
-        tips.append(("[격식]", "'-습니다'로 학술 톤.", "예) 배웠습니다 / 느꼈습니다."))
-    if len(tips) < 2:
-        tips.append(("[연결어]", "이유-결과 연결: 그래서/그러나.", "예) …배웠습니다. 그래서 감사했습니다."))
-    if len(tips) < 2:
-        tips.append(("[문장 분리]", "긴 문장은 두 문장으로.", "예) 수업이 끝났습니다. 곧 정리했습니다."))
+def demo_feedback(text: str, examples_block: str, lang: str, strategy: str) -> str:
+    base_kr = [
+        "좋은 시도예요. 신앙의 마음이 잘 느껴집니다.",
+        "- [조사] '의/을/를'을 정확히 씁니다.",
+        "- [격식] '-습니다'체로 정리합니다.",
+    ]
+    if strategy.startswith("모형 제시"):
+        body = [
+            "[모형 제시]",
+            "예시 문장: 우리는 하나님의 은혜로 변화되었습니다. 그러므로 공동체에서 사랑을 실천하고자 합니다.",
+            "규칙: 조사(을/를), 연결어(그러므로), 격식(-습니다) 사용.",
+            "따라 써보기: '저는 ___로 변화되었습니다. 그러므로 ___을/를 하겠습니다.'",
+        ]
+    elif strategy.startswith("단계 안내"):
+        body = [
+            "[단계 안내]",
+            "분해: S1, S2, S3로 문장을 나눕니다.",
+            "수정: 조사/어미/연결어를 각각 1개씩 고칩니다.",
+            "결합: 수정한 문장을 3–5문장으로 재구성합니다.",
+        ]
+    else:
+        body = [
+            "[확장 유도]",
+            "근거: 왜 그런가를 한 문장으로 밝히세요.",
+            "사례: 성경 인물 1명을 들어 한 문장으로 제시하세요.",
+            "인용: 관련 구절을 자연스럽게 연결하세요(예: 고전 13장).",
+        ]
 
     if lang == "영어 (EN)":
-        return "\n".join([
-            "Great effort—your faith and intention are clear.",
-            "- [Particles] Use '의/을/를' properly. e.g., 하나님의 사랑을 배웠습니다.",
-            "- [Polite ending] Use '-습니다' for academic tone.",
+        lang_tail = [
             examples_block.strip() or "📖 (No related Bible example)",
-            "Please rewrite in 3–5 sentences using the feedback.",
-            "Strength: Clear topic | Next goal: particles & polite endings.",
-        ])
+            "Please rewrite in 3–5 sentences using the structure above."
+        ]
     elif lang == "이중언어 (KR+EN)":
-        kr = [
-            "좋은 시도예요. 신앙의 마음이 잘 느껴집니다.",
-            "- [조사] '의/을/를'을 정확히 씁니다. 예) 하나님의 사랑을 배웠습니다.",
-            "- [격식] '-입니다/-습니다'체 사용.",
+        lang_tail = [
             examples_block.strip() or "📖 (관련 성경 예시 없음)",
-            "이제 위 내용을 참고해 3–5문장으로 다시 써보세요.",
-            "강점: 주제가 분명함 | 다음 목표: 조사·격식 다듬기",
-        ]
-        en = [
             "----------",
-            "[EN] Focus on particles and polite endings.",
-            "Rewrite in 3–5 sentences using the feedback."
+            "[EN] Follow the selected strategy (Modeling/Scaffolding/Extension) above and rewrite in 3–5 sentences."
         ]
-        return "\n".join(kr + en)
     else:
-        # 한국어 기본
-        lines = [
-            "좋은 시도예요. 신앙의 마음이 잘 느껴집니다.",
-            "- [조사] '의/을/를'을 정확히 씁니다.",
-            "- [격식] '-습니다'체로 정리합니다.",
+        lang_tail = [
             examples_block.strip() or "📖 (관련 성경 예시 없음)",
-            "3–5문장으로 다시 써보세요.",
-            "강점: 주제가 분명함 | 다음 목표: 조사·격식 다듬기",
+            "위 구조대로 3–5문장으로 재작성해 보세요."
         ]
-        return "\n".join(lines)
+    return "\n".join(base_kr + body + lang_tail)
 
 # -------------------------------
 # 실행 로직
@@ -473,12 +562,13 @@ if run_clicked:
                 feedback = resp.choices[0].message.content.strip()
             except Exception as e:
                 st.warning(f"(API 오류로 데모로 전환) {e}")
-                feedback = demo_feedback(student_text, examples_block, language)
+                feedback = demo_feedback(student_text, examples_block, language, strategy)
         else:
-            feedback = demo_feedback(student_text, examples_block, language)
+            feedback = demo_feedback(student_text, examples_block, language, strategy)
 
-        # 모드 출력 검증
+        # 모드·전략 출력 검증
         feedback = validate_output_by_mode(feedback, language)
+        feedback = validate_output_by_strategy(feedback, strategy)
 
         st.subheader("💬 AI 피드백")
         st.write(feedback)
