@@ -1,6 +1,5 @@
 # ===============================
-# PATH AI Writing Tutor (Unified Build)
-# Mode & Strategy Differentiation + Admin-only Diagnostics
+# PATH AI Writing Tutor (Corpus-First + 새번역 Fallback Unified)
 # ===============================
 import os
 import re
@@ -17,6 +16,13 @@ from rapidfuzz import process, fuzz
 st.set_page_config(page_title="PATH AI Writing Tutor", page_icon="🧭", layout="centered")
 st.title("🧭 PATH AI writing tutor— 신학 유학생용 한국어 작문 튜터")
 st.caption("Pedagogical AI writing tutor for Theology and Humanities (TOPIK 3–4)")
+
+# -------------------------------
+# 새번역/코퍼스 우선 정책
+# -------------------------------
+BIBLE_VERSION = "새번역"         # 표준 새번역으로 통일
+PREFER_CORPUS_ONLY = True        # 코퍼스 우선(기본 True)
+FALLBACK_MAX = 2                 # 코퍼스가 부족할 때 AI 보충 최대 개수
 
 # -------------------------------
 # Secrets / .env 로드
@@ -78,9 +84,10 @@ def save_log(pid: str, trial: int, lang: str, topic: str, stage: str, text: str)
 
 @st.cache_data(show_spinner=False)
 def load_corpus(path: str = "corpus.csv") -> pd.DataFrame:
-    """성경 병렬 코퍼스 로드 + 컬럼 표준화"""
+    """성경 병렬 코퍼스 로드 + 컬럼 표준화 + 새번역 고정"""
     df = pd.read_csv(path)
     df.columns = [c.strip().lower() for c in df.columns]
+
     # 컬럼 맵핑
     mapping = {}
     want_map = {
@@ -90,6 +97,7 @@ def load_corpus(path: str = "corpus.csv") -> pd.DataFrame:
         "ko": ["ko", "kor", "korean", "한글", "본문", "본문(한)"],
         "en": ["en", "eng", "english", "영문", "본문(영)"],
         "tags": ["tags", "tag", "주제", "키워드"],
+        "version": ["version", "translation", "번역", "역본"],
     }
     for want, cands in want_map.items():
         for c in cands:
@@ -98,12 +106,14 @@ def load_corpus(path: str = "corpus.csv") -> pd.DataFrame:
                 break
     df = df.rename(columns=mapping)
 
+    # 필수 컬럼 확인
     required = ["book", "chapter", "verse", "ko", "en", "tags"]
     missing = [r for r in required if r not in df.columns]
     if missing:
         st.error(f"corpus.csv에 다음 컬럼이 필요합니다: {missing}")
         st.stop()
 
+    # 타입/결측 처리
     for c in ("chapter", "verse"):
         try:
             df[c] = df[c].astype(int)
@@ -111,7 +121,22 @@ def load_corpus(path: str = "corpus.csv") -> pd.DataFrame:
             pass
     for c in ("tags", "ko", "en"):
         df[c] = df[c].astype(str).fillna("")
+
+    # version 컬럼 보정: 기본값 새번역
+    if "version" not in df.columns:
+        df["version"] = BIBLE_VERSION
+    else:
+        df["version"] = df["version"].fillna(BIBLE_VERSION)
+
+    # 새번역만 사용
+    df = df[df["version"].str.contains(BIBLE_VERSION)]
+    if df.empty:
+        st.error("corpus.csv에서 '새번역' 행을 찾지 못했습니다. version 컬럼을 확인하세요.")
+        st.stop()
+
     return df
+
+corpus = load_corpus()
 
 @st.cache_data(show_spinner=False)
 def load_prompt(path: str) -> str:
@@ -127,7 +152,6 @@ def load_prompt(path: str) -> str:
             "Keep within 10–12 lines."
         )
 
-corpus = load_corpus()
 prompt_kr = load_prompt("feedback_prompt.txt")
 prompt_en = load_prompt("feedback_prompt_en.txt")
 
@@ -139,42 +163,77 @@ def extract_keywords(text: str, topn: int = 6):
     return toks[:topn] if toks else []
 
 def lookup_examples(text: str, topk: int = 2) -> list[dict]:
+    """코퍼스 우선 검색 → 부족하면 빈자리만큼 'AI_FALLBACK' 요청 토큰 삽입"""
     kws = extract_keywords(text)
     if not kws:
-        return corpus.sample(n=min(topk, len(corpus))).to_dict(orient="records")
-    pool = corpus["tags"].tolist() + corpus["ko"].tolist() + corpus["en"].tolist()
-    candidates = []
-    for kw in kws:
-        m = process.extractOne(kw, pool, scorer=fuzz.partial_ratio, score_cutoff=70)
-        if not m:
-            continue
-        val = m[0]
-        row = corpus[
-            (corpus["tags"].str.contains(re.escape(kw), na=False))
-            | (corpus["ko"] == val) | (corpus["en"] == val)
-            | (corpus["ko"].str.contains(re.escape(kw)))
-            | (corpus["en"].str.contains(re.escape(kw)))
-        ].head(1)
-        if not row.empty:
-            candidates.append(row.iloc[0].to_dict())
-    # 중복 제거 + 부족 시 랜덤 보충
-    seen, uniq = set(), []
-    for r in candidates:
-        key = (r["book"], int(r["chapter"]), int(r["verse"]))
-        if key not in seen:
-            seen.add(key); uniq.append(r)
-        if len(uniq) >= topk:
-            break
-    if len(uniq) < topk:
-        rest = topk - len(uniq)
-        uniq.extend(corpus.sample(n=min(rest, len(corpus))).to_dict(orient="records"))
-    return uniq[:topk]
+        base = corpus.sample(n=min(topk, len(corpus))).to_dict(orient="records")
+    else:
+        pool = corpus["tags"].tolist() + corpus["ko"].tolist() + corpus["en"].tolist()
+        candidates = []
+        for kw in kws:
+            m = process.extractOne(kw, pool, scorer=fuzz.partial_ratio, score_cutoff=70)
+            if not m:
+                continue
+            val = m[0]
+            row = corpus[
+                (corpus["tags"].str.contains(re.escape(kw), na=False))
+                | (corpus["ko"] == val) | (corpus["en"] == val)
+                | (corpus["ko"].str.contains(re.escape(kw)))
+                | (corpus["en"].str.contains(re.escape(kw)))
+            ].head(1)
+            if not row.empty:
+                candidates.append(row.iloc[0].to_dict())
+
+        # 중복 제거
+        seen, base = set(), []
+        for r in candidates:
+            key = (r["book"], int(r["chapter"]), int(r["verse"]))
+            if key not in seen:
+                seen.add(key); base.append(r)
+            if len(base) >= topk:
+                break
+
+        if len(base) < topk:
+            rest = topk - len(base)
+            # 우선 코퍼스 랜덤 보충
+            remain = corpus.sample(n=min(rest, len(corpus))).to_dict(orient="records")
+            base.extend(remain[:rest])
+
+    # 새번역 필터(안전)
+    base = [r for r in base if str(r.get("version", BIBLE_VERSION)).find(BIBLE_VERSION) != -1]
+
+    # 부족하면 AI Fallback 슬롯 삽입
+    if len(base) < topk:
+        need = min(FALLBACK_MAX, topk - len(base))
+        query = ", ".join(kws) if kws else "사랑, 믿음, 감사"
+        for i in range(need):
+            base.append({
+                "_ai_fallback": True,
+                "query": query,
+                "note": f"코퍼스에 부족 — '{BIBLE_VERSION}'에서 {i+1}개 인용 보충 요청"
+            })
+    return base[:topk]
 
 def format_bible_examples(rows: list[dict]) -> str:
-    out = []
+    """코퍼스 예시는 KR_QUOTE로 고정 / AI 보충 요청은 Fallback 섹션에 별도 지시"""
+    corpus_lines, fallback_lines = [], []
     for r in rows:
-        out.append(f"📖 {r['book']} {r['chapter']}:{r['verse']} — {r['ko']}\n({r['en']})")
-    return "\n".join(out)
+        if r.get("_ai_fallback"):
+            fallback_lines.append(
+                f"- REQUEST: 새번역 인용 1개, 키워드[{r['query']}], 정확 인용/참조, 임의 각색 금지"
+            )
+        else:
+            corpus_lines.append(
+                f"📖 {r['book']} {r['chapter']}:{r['verse']} ({BIBLE_VERSION})\n"
+                f"KR_QUOTE: \"{r['ko']}\"\n"
+                f"EN_NOTE: {r['en']}"
+            )
+    out = []
+    if corpus_lines:
+        out.append("\n\n".join(corpus_lines))
+    if fallback_lines:
+        out.append("AI_FALLBACK_REQUESTS:\n" + "\n".join(fallback_lines))
+    return "\n\n".join(out).strip()
 
 # -------------------------------
 # 전략 프로필 (명시적 템플릿)
@@ -216,23 +275,20 @@ STRATEGY_PROFILES = {
 # 모드별 시스템/유저 프롬프트 빌더 (강화)
 # -------------------------------
 def build_system_msg(language: str) -> str:
+    base = (
+        "You are a Korean academic writing tutor for theology students. "
+        "Use the provided Bible excerpts (KR_QUOTE) for any quotation. "
+        "If AI_FALLBACK_REQUESTS are present, you may add up to the requested number of quotations "
+        f"from the Standard Korean Bible ({BIBLE_VERSION}) only. "
+        "Never invent or paraphrase verses; provide exact quotes with references. "
+        f"All quotations must be marked with ({BIBLE_VERSION}). "
+    )
     if language == "한국어 (KR)":
-        return (
-            "You are a Korean academic writing tutor for theology students. "
-            "Respond ONLY in Korean. Use polite '-습니다' style. "
-            "Never include English unless the user text itself is English."
-        )
+        return base + "Respond ONLY in Korean. Use polite '-습니다' style."
     elif language == "영어 (EN)":
-        return (
-            "You are an academic writing tutor for theology students. "
-            "Respond ONLY in English. Do not include any Korean."
-        )
-    else:  # 이중언어 (KR+EN)
-        return (
-            "You are a bilingual (KR+EN) academic writing tutor for theology students. "
-            "First, produce a full Korean feedback section. Then add a separator line "
-            "and provide a concise English summary (2–3 lines)."
-        )
+        return base + "Respond ONLY in English."
+    else:
+        return base + "Produce Korean feedback first, then an English brief."
 
 def build_user_prompt(base_prompt: str, language: str, student_text: str,
                       examples_block: str, strategy: str) -> str:
@@ -255,7 +311,16 @@ def build_user_prompt(base_prompt: str, language: str, student_text: str,
 [필수 표기(출력에 반드시 포함)]
 - {', '.join(profile['must_phrases'])}
 """
-    # 언어별 프롬프트 본문 + 전략 블록
+
+    common_rules = f"""
+[인용 규칙 - 반드시 준수]
+- 성경 인용은 [관련 성경 예시]의 KR_QUOTE에서만 가져옵니다.
+- 만약 'AI_FALLBACK_REQUESTS'가 있다면, 요청 개수만큼 ({BIBLE_VERSION})에서 정확히 찾아 인용하세요.
+- 역본 표기는 반드시 ({BIBLE_VERSION})로 표시합니다.
+- 코퍼스/새번역에 없는 구절이나 임의 각색은 금지합니다(확실치 않으면 '검증 필요' 표시).
+"""
+
+    # 언어별 프롬프트 본문 + 전략 + 공통 규칙
     if language == "한국어 (KR)":
         return f"""
 {base_prompt}
@@ -270,6 +335,8 @@ def build_user_prompt(base_prompt: str, language: str, student_text: str,
 {strategy}
 
 {strat_block}
+
+{common_rules}
 
 [출력 형식 엄수]
 - 반드시 **한국어**로만 작성
@@ -291,6 +358,8 @@ def build_user_prompt(base_prompt: str, language: str, student_text: str,
 
 {strat_block}
 
+{common_rules}
+
 [OUTPUT FORMAT - STRICT]
 - Respond **ONLY in English**
 - 8–10 lines, academic tone
@@ -311,6 +380,8 @@ def build_user_prompt(base_prompt: str, language: str, student_text: str,
 
 {strat_block}
 
+{common_rules}
+
 [OUTPUT FORMAT - STRICT]
 (1) [KR] 한국어 섹션 (10~12줄, '-습니다'체)
     - 칭찬 → 오류2(설명+고친예) → (전략 섹션 수행) → 재작성 지시 → 강점/다음목표
@@ -320,26 +391,22 @@ def build_user_prompt(base_prompt: str, language: str, student_text: str,
 """
 
 # -------------------------------
-# 출력 검증기(모드 위반 자동 안내)
+# 출력 검증기(모드/전략/인용)
 # -------------------------------
 def validate_output_by_mode(output: str, language: str) -> str:
     kr = len(re.findall(r"[가-힣]", output))
     en = len(re.findall(r"[A-Za-z]", output))
-
     if language == "한국어 (KR)":
         if en > kr * 0.2:
             output = "⚠️ (자동 점검) 영어 비율이 높습니다. 한국어로만 간결하게 작성해 주세요.\n\n" + output
     elif language == "영어 (EN)":
         if kr > en * 0.2:
             output = "⚠️ (Auto check) Too much Korean detected. Respond in English only.\n\n" + output
-    else:  # 이중언어
+    else:
         if "----------" not in output or "[EN]" not in output:
             output += "\n\n----------\n[EN] Please add a 2–3 line English summary of key feedback and rewrite goal."
     return output
 
-# -------------------------------
-# 전략 검증기(필수 표기 확인)
-# -------------------------------
 def validate_output_by_strategy(output: str, strategy: str) -> str:
     profile = STRATEGY_PROFILES.get(strategy)
     if not profile:
@@ -357,6 +424,28 @@ def validate_output_by_strategy(output: str, strategy: str) -> str:
         )
     return output
 
+def validate_bible_citation(output: str, examples_block: str) -> str:
+    # 코퍼스 인용 일치 여부(간단 휴리스틱)
+    quotes = re.findall(r'KR_QUOTE:\s*"([^"]+)"', examples_block)
+    found_match = False
+    for q in quotes:
+        seg = q.strip()
+        if len(seg) >= 10 and seg[:10] in output:
+            found_match = True
+            break
+    # Fallback이 없고 코퍼스만 제공되었는데 인용 일치가 없으면 경고
+    if "AI_FALLBACK_REQUESTS:" not in examples_block and quotes and not found_match:
+        output = (
+            f"⚠️ (자동 점검) 성경 인용이 코퍼스 KR_QUOTE와 일치하지 않습니다. "
+            f"제공된 문장을 그대로 사용하고 역본 표기를 ({BIBLE_VERSION})로 표기해 주세요.\n\n"
+        ) + output
+
+    # 역본 표기 확인
+    if f"({BIBLE_VERSION})" not in output:
+        output = f"⚠️ (자동 점검) 역본 표기({BIBLE_VERSION})가 누락되었습니다.\n\n" + output
+
+    return output
+
 # -------------------------------
 # 사이드바 (참가자 & 교수자)
 # -------------------------------
@@ -371,7 +460,6 @@ is_admin = False
 if ADMIN_CODE_SECRET and admin_input == ADMIN_CODE_SECRET:
     is_admin = True
 elif ADMIN_CODE_SECRET is None and admin_input.strip():
-    # 로컬 개발 시 임시 허용 (Cloud에서는 Secrets 설정 권장)
     is_admin = True
 
 if is_admin:
@@ -421,13 +509,11 @@ if is_admin:
         files = ["app.py", "requirements.txt", "corpus.csv", "feedback_prompt.txt", "feedback_prompt_en.txt"]
         exists = {f: ("✅" if os.path.exists(f) else "❌") for f in files}
         st.table({"파일": list(exists.keys()), "존재": list(exists.values())})
-
         try:
             df_probe = pd.read_csv("corpus.csv").head(2)
             st.write("corpus.csv 미리보기:", df_probe)
         except Exception as e:
             st.error(f"corpus.csv 읽기 오류: {e}")
-
         for p in ["feedback_prompt.txt", "feedback_prompt_en.txt"]:
             try:
                 with open(p, "r", encoding="utf-8") as f:
@@ -443,7 +529,6 @@ language = st.radio(
     ["한국어 (KR) — 한국어만", "영어 (EN) — English only", "이중언어 (KR+EN) — KR + EN summary"],
     index=0, horizontal=True
 )
-# 선택값 표준화
 language = language.split(" — ")[0]
 
 topic = st.selectbox("주제(태그)", ["(자동)", "사랑", "믿음", "기도", "감사", "말씀", "권면", "설명", "요약", "적용"])
@@ -456,8 +541,7 @@ strategy = st.selectbox(
         "확장 유도 (Extension) — 근거/사례/인용으로 논증 확장"
     ],
     index=0
-)
-strategy = strategy.split(" — ")[0]  # 내부 키로 정규화
+).split(" — ")[0]
 agree = st.checkbox("연구 참여 및 텍스트 익명 저장에 동의합니다.")
 
 col_btn1, col_btn2 = st.columns(2)
@@ -466,7 +550,7 @@ if col_btn2.button("지우기"):
     st.experimental_rerun()
 
 # -------------------------------
-# 데모 피드백(오프라인 폴백 — 모드·전략 차별화)
+# 데모 폴백(오프라인) — 모드·전략 차별화
 # -------------------------------
 def demo_feedback(text: str, examples_block: str, lang: str, strategy: str) -> str:
     base_kr = [
@@ -505,7 +589,7 @@ def demo_feedback(text: str, examples_block: str, lang: str, strategy: str) -> s
         lang_tail = [
             examples_block.strip() or "📖 (관련 성경 예시 없음)",
             "----------",
-            "[EN] Follow the selected strategy (Modeling/Scaffolding/Extension) above and rewrite in 3–5 sentences."
+            "[EN] Follow the selected strategy and rewrite in 3–5 sentences."
         ]
     else:
         lang_tail = [
@@ -531,7 +615,9 @@ if run_clicked:
         if topic and topic != "(자동)":
             tagged = corpus[corpus["tags"].str.contains(re.escape(topic), na=False)]
             if not tagged.empty:
+                # 코퍼스 우선: 태그 매칭으로 대체
                 examples = tagged.sample(n=min(2, len(tagged))).to_dict(orient="records")
+
         examples_block = format_bible_examples(examples)
 
         # 프롬프트 선택
@@ -566,9 +652,10 @@ if run_clicked:
         else:
             feedback = demo_feedback(student_text, examples_block, language, strategy)
 
-        # 모드·전략 출력 검증
+        # 모드·전략·인용 출력 검증
         feedback = validate_output_by_mode(feedback, language)
         feedback = validate_output_by_strategy(feedback, strategy)
+        feedback = validate_bible_citation(feedback, examples_block)
 
         st.subheader("💬 AI 피드백")
         st.write(feedback)
